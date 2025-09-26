@@ -200,22 +200,76 @@ function clearCanvas() {
   }
 }
 
+// Connect to a 3D printer and send test G-code
 async function connectPrinter() {
   if (!checkAPISupport('webusb')) return;
+  let device = null;
   try {
+    // Log connection attempt
     console.log('Starting printer connection...');
-    console.log('navigator.usb available:', !!navigator.usb); // Логування доступності API
-    const device = await navigator.usb.requestDevice({ filters: [] });
+    console.log('WebUSB API availability:', !!navigator.usb);
+
+    // Request USB device (printer)
+    device = await navigator.usb.requestDevice({ filters: [] });
     console.log('Printer device requested:', device.productName);
+
+    // Log all device properties
+    console.log('Device Properties:');
+    Object.getOwnPropertyNames(device).forEach(prop => {
+      try {
+        const value = device[prop];
+        console.log(`  ${prop}:`, typeof value === 'object' && value !== null ? JSON.stringify(value, null, 2) : value);
+      } catch (err) {
+        console.warn(`Failed to access device property ${prop}:`, err.message);
+      }
+    });
+
+    // Open the device
     await device.open();
     console.log('Printer opened successfully');
-    document.getElementById('error').textContent = `Printer: ${device.productName} connected`;
+
+    // Select configuration (usually the first one)
+    if (!device.configuration) {
+      await device.selectConfiguration(1);
+      console.log('Configuration selected:', device.configurationValue);
+    }
+
+    // Claim interface (typically interface 0 for 3D printers)
+    await device.claimInterface(0);
+    console.log('Interface 0 claimed');
+
+    // Send test G-code (G28 to home all axes)
+    const testGcode = 'G28\n'; // Home all axes
+    const encoder = new TextEncoder();
+    const data = encoder.encode(testGcode);
+    console.log('Sending test G-code:', testGcode.trim());
+    
+    // Assume endpoint 1 is the output endpoint (common for USB CDC devices)
+    await device.transferOut(1, data);
+    console.log('Test G-code sent successfully');
+
+    // Update UI with success
+    document.getElementById('error').textContent = `Printer: ${device.productName} connected, G-code sent: ${testGcode.trim()}`;
     document.getElementById('error').classList.add('show');
   } catch (err) {
     console.error('Printer Error - Name:', err.name, 'Message:', err.message, 'Stack:', err.stack);
-    console.error('navigator.usb available:', !!navigator.usb);
-    document.getElementById('error').textContent = 'Помилка принтера: ' + err.name + ' - ' + err.message;
+    console.error('WebUSB API availability:', !!navigator.usb);
+    document.getElementById('error').textContent = `Помилка принтера: ${err.name} - ${err.message}`;
     document.getElementById('error').classList.add('show');
+  } finally {
+    // Clean up: release interface and close device
+    if (device && device.opened) {
+      try {
+        await device.releaseInterface(0);
+        console.log('Interface 0 released');
+        await device.close();
+        console.log('Printer device closed');
+      } catch (err) {
+        console.warn('Failed to release/close device:', err.message);
+        document.getElementById('error').textContent = `Помилка закриття принтера: ${err.message}`;
+        document.getElementById('error').classList.add('show');
+      }
+    }
   }
 }
 
@@ -236,7 +290,7 @@ async function connectArduino() {
   }
 }
 
-// Ініціалізація з логуванням
+// Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
   console.log('PhantomBridge loaded');
   console.log('File System API support:', !!window.showDirectoryPicker);
