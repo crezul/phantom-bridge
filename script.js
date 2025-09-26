@@ -99,7 +99,7 @@ async function uploadFile(event) {
   } catch (err) {
     console.error('Upload error - Name:', err.name, 'Message:', err.message, 'Stack:', err.stack);
     errorDiv.textContent = 'Помилка завантаження: ' + err.name + ' - ' + err.message;
-    errorDiv.classList.add('show');
+    document.getElementById('error').classList.add('show');
   }
 }
 
@@ -204,6 +204,7 @@ function clearCanvas() {
 async function connectPrinter() {
   if (!checkAPISupport('webusb')) return;
   let device = null;
+  let claimedInterface = null;
   try {
     // Log connection attempt
     console.log('Starting printer connection...');
@@ -234,18 +235,58 @@ async function connectPrinter() {
       console.log('Configuration selected:', device.configurationValue);
     }
 
-    // Claim interface (typically interface 0 for 3D printers)
-    await device.claimInterface(0);
-    console.log('Interface 0 claimed');
+    // Log available interfaces
+    console.log('Available Interfaces:');
+    device.configuration.interfaces.forEach(iface => {
+      console.log(`  Interface ${iface.interfaceNumber}:`, JSON.stringify({
+        classCode: iface.alternate.interfaceClass,
+        subClassCode: iface.alternate.interfaceSubclass,
+        protocolCode: iface.alternate.interfaceProtocol,
+        endpoints: iface.alternate.endpoints
+      }, null, 2));
+    });
+
+    // Try to claim a non-protected interface (prefer CDC, class code 0x02)
+    let targetInterface = null;
+    let outputEndpoint = null;
+    for (const iface of device.configuration.interfaces) {
+      const classCode = iface.alternate.interfaceClass;
+      console.log(`Attempting to claim interface ${iface.interfaceNumber} (Class: 0x${classCode.toString(16)})`);
+      if (classCode !== 0x03 && classCode !== 0x08 && classCode !== 0x01 && classCode !== 0x0B && classCode !== 0x0E) {
+        // Avoid protected classes (HID, Mass Storage, Audio, Smart Card, Video)
+        try {
+          await device.claimInterface(iface.interfaceNumber);
+          console.log(`Interface ${iface.interfaceNumber} claimed successfully`);
+          targetInterface = iface;
+          claimedInterface = iface.interfaceNumber;
+          // Find output endpoint (direction: 'out')
+          outputEndpoint = iface.alternate.endpoints.find(ep => ep.direction === 'out');
+          if (outputEndpoint) {
+            console.log(`Output endpoint found: ${outputEndpoint.endpointNumber}`);
+            break;
+          } else {
+            console.warn(`No output endpoint in interface ${iface.interfaceNumber}`);
+            await device.releaseInterface(iface.interfaceNumber);
+            claimedInterface = null;
+          }
+        } catch (err) {
+          console.warn(`Failed to claim interface ${iface.interfaceNumber}:`, err.message);
+        }
+      } else {
+        console.warn(`Interface ${iface.interfaceNumber} is protected (Class: 0x${classCode.toString(16)})`);
+      }
+    }
+
+    if (!targetInterface || !outputEndpoint) {
+      throw new Error('No suitable interface or output endpoint found');
+    }
 
     // Send test G-code (G28 to home all axes)
     const testGcode = 'G28\n'; // Home all axes
     const encoder = new TextEncoder();
     const data = encoder.encode(testGcode);
     console.log('Sending test G-code:', testGcode.trim());
-    
-    // Assume endpoint 1 is the output endpoint (common for USB CDC devices)
-    await device.transferOut(1, data);
+    await device.transferOut(outputEndpoint.endpointNumber, data);
     console.log('Test G-code sent successfully');
 
     // Update UI with success
@@ -258,14 +299,22 @@ async function connectPrinter() {
     document.getElementById('error').classList.add('show');
   } finally {
     // Clean up: release interface and close device
+    if (device && device.opened && claimedInterface !== null) {
+      try {
+        await device.releaseInterface(claimedInterface);
+        console.log(`Interface ${claimedInterface} released`);
+      } catch (err) {
+        console.warn(`Failed to release interface ${claimedInterface}:`, err.message);
+        document.getElementById('error').textContent = `Помилка закриття інтерфейсу: ${err.message}`;
+        document.getElementById('error').classList.add('show');
+      }
+    }
     if (device && device.opened) {
       try {
-        await device.releaseInterface(0);
-        console.log('Interface 0 released');
         await device.close();
         console.log('Printer device closed');
       } catch (err) {
-        console.warn('Failed to release/close device:', err.message);
+        console.warn('Failed to close device:', err.message);
         document.getElementById('error').textContent = `Помилка закриття принтера: ${err.message}`;
         document.getElementById('error').classList.add('show');
       }
